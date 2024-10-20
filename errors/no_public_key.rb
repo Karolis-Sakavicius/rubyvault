@@ -1,0 +1,3 @@
+  class NoPublicKey < StandardError
+  end
+  
