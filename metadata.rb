@@ -14,128 +14,145 @@
 require 'pry'
 
 class Metadata
-  METADATA_OFFSET = 6
-
-  def initialize(rsa_pem, metadata, cipher: nil, key: nil, iv: nil)
+  def initialize(rsa_pem, vault_file)
     @rsa_pem = rsa_pem
-    @metadata = metadata
+    @vault_file = vault_file
+    @metadata = []
 
-    if cipher
-      @cipher = cipher
-      @key = key
-      @iv = iv
-    else
-      @cipher, @key, @iv = new_cipher
+    if @vault_file.empty?
+      @initial_call = true
+      # initializing encrypt cipher
+      encrypt_cipher
+    end
+
+    read_metadata unless @vault_file.empty?
+  end
+
+  def read_metadata
+    @vault_file.lock_into(:metadata) do
+      if @rsa_pem.private?
+        @key = @rsa_pem.private_decrypt(@vault_file.read(512))
+        @iv = @vault_file.read(16)
+
+        cipher = OpenSSL::Cipher.new('aes-256-cbc')
+        cipher.decrypt
+        cipher.key = @key
+        cipher.iv = @iv
+      else
+        @vault_file.move_to(512 + 16) # ignoring the key if pem does not have a private key
+      end
+
+      12.times do |row|
+        key_length = @vault_file.read(1).unpack('C').first
+        value_length = @vault_file.read(1).unpack('C').first
+        is_encrypted = @vault_file.read(1).unpack('C').first
+
+        break if key_length == 0 # further meta rows are empty
+
+        if is_encrypted == 1 && @rsa_pem.private?
+          encrypted_key = @vault_file.read(32)[0..key_length - 1]
+          encrypted_value = @vault_file.read(64)[0..value_length - 1]
+
+          row_key = cipher.update(encrypted_key) + cipher.final
+          row_value = cipher.update(encrypted_value) + cipher.final
+
+          @metadata << {key: row_key, value: row_value, encrypted: true}
+        elsif is_encrypted == 1 && !@rsa_pem.private?
+          @vault_file.read(96) # moving the pointer further & ignoring the encrypted row
+          @metadata << {key: '[ENCRYPTED]', value: '[ENCRYPTED]', encrypted: true}
+        else
+          row_key = @vault_file.read(32)[0..key_length - 1]
+          row_value = @vault_file.read(64)[0..value_length - 1]
+
+          @metadata << {key: row_key, value: row_value, encrypted: false}
+        end
+      end
     end
   end
 
-  def self.from_file(file, rsa_pem)
-    file.pos = METADATA_OFFSET
+  # Metadata key is encrypted with public key and requires private one to
+  # decrypt it. Then this key gets encrypted again with a public key.
+  # Hence this requires public & private keys to be present.
+  #
+  # TODO: can be optimized to work with only private key.
+  def add_metadata(key:, value:, encrypt:)
+    raise NoPrivateKey unless @rsa_pem.private?
+    raise NoPublicKey unless @rsa_pem.public?
 
-    if rsa_pem.private?
-      key = rsa_pem.private_decrypt(file.read(512))
-      iv = file.read(16)
+    @metadata << {key: key, value: value, encrypted: encrypt, pending: true}
+  end
 
-      cipher = OpenSSL::Cipher.new('aes-256-cbc')
-      cipher.decrypt
-      cipher.key = key
-      cipher.iv = iv
-    else
-      file.pos = METADATA_OFFSET + 512 + 16 # ignoring the key if pem does not have a private key
-    end
-
-    metadata = []
-
-    12.times do |row|
-      key_length = file.read(1).unpack('C').first
-      value_length = file.read(1).unpack('C').first
-      is_encrypted = file.read(1).unpack('C').first
-
-      break if key_length == 0 # further meta rows are empty
-
-      if is_encrypted == 1 && rsa_pem.private?
-        encrypted_key = file.read(32)[0..key_length - 1]
-        encrypted_value = file.read(64)[0..value_length - 1]
-
-        row_key = cipher.update(encrypted_key) + cipher.final
-        row_value = cipher.update(encrypted_value) + cipher.final
-
-        metadata << {key: row_key, value: row_value, encrypted: true}
-      elsif is_encrypted == 1 && !rsa_pem.private?
-        file.read(96) # moving the pointer further & ignoring the encrypted row
-        metadata << {key: '[ENCRYPTED]', value: '[ENCRYPTED]', encrypted: true}
-      else
-        row_key = file.read(32)[0..key_length - 1]
-        row_value = file.read(64)[0..value_length - 1]
-
-        metadata << {key: row_key, value: row_value, encrypted: false}
-      end
-    end
-
-    new(rsa_pem, metadata, cipher: cipher, key: key, iv: iv)
+  def changes_pending?
+    @metadata.any? { |meta| meta[:pending] == true }
   end
 
   def to_a
     @metadata
   end
 
-  def to_h
-    {}.tap do |meta_hash|
-      @metadata.each do |meta|
-        meta_hash[meta[:key]] = {value: meta[:value], encrypted: meta[:encrypted]}
-      end
+  # When changes are present ALL metadata is rewritten to ensure AES-256 integrity.
+  # Encrypted rows must be encrypted in a right order, as rows do not contain
+  # individual IVs.
+  def commit_changes!
+    return unless changes_pending?
+
+    @vault_file.lock_into(:metadata) do
+      @vault_file << @rsa_pem.public_encrypt(@key) # AES key
+      @vault_file << @iv
+
+      write_binary_table
     end
-  end
 
-  def to_binary
-    binary_string = ''
+    @metadata.each do |meta|
+      meta.delete(:pending)
+    end
 
-    binary_string << @rsa_pem.public_encrypt(@key) # AES key
-    binary_string << @iv # IV
-    binary_string << binary_table
-
-    binary_string
+    true
   end
 
   private
 
   # TODO: max 12 entries
   # TODO: length validations
-  def binary_table
-    binary_string = ''
-
+  def write_binary_table
     12.times do |row_no|
       meta = @metadata[row_no]
 
       if meta.nil?
-        binary_string << "\x00" * 99 # filling unused rows with NULL
+        @vault_file << "\x00" * 99 # filling unused rows with NULL
       elsif meta[:encrypted]
-        encrypted_key = @cipher.update(meta[:key].to_s) + @cipher.final
-        encrypted_value = @cipher.update(meta[:value]) + @cipher.final
+        encrypted_key = encrypt_cipher.update(meta[:key].to_s) + encrypt_cipher.final
+        encrypted_value = encrypt_cipher.update(meta[:value]) + encrypt_cipher.final
 
-        binary_string << [encrypted_key.size].pack('C') # key length
-        binary_string << [encrypted_value.size].pack('C') # value length
-        binary_string << [1].pack('C') # is encrypted = 1
-        binary_string << encrypted_key.ljust(32, "\x00") # key
-        binary_string << encrypted_value.ljust(64, "\x00") # value
+        @vault_file << [encrypted_key.size].pack('C') # key length
+        @vault_file << [encrypted_value.size].pack('C') # value length
+        @vault_file << [1].pack('C') # is encrypted = 1
+        @vault_file << encrypted_key.ljust(32, "\x00") # key
+        @vault_file << encrypted_value.ljust(64, "\x00") # value
       else
-        binary_string << [meta[:key].size].pack('C') # key length
-        binary_string << [meta[:value].size].pack('C') # value length
-        binary_string << [0].pack('C') # is encrypted = 0
-        binary_string << [meta[:key].to_s].pack('a*').ljust(32, "\x00") # key
-        binary_string << [meta[:value]].pack('a*').ljust(64, "\x00") # value
+        @vault_file << [meta[:key].size].pack('C') # key length
+        @vault_file << [meta[:value].size].pack('C') # value length
+        @vault_file << [0].pack('C') # is encrypted = 0
+        @vault_file << [meta[:key].to_s].pack('a*').ljust(32, "\x00") # key
+        @vault_file << [meta[:value]].pack('a*').ljust(64, "\x00") # value
       end
     end
-
-    binary_string
   end
 
-  def new_cipher
-    cipher = OpenSSL::Cipher.new('aes-256-cbc')
-    cipher.encrypt
-    iv = cipher.random_iv
-    key = cipher.random_key
+  def encrypt_cipher
+    return @encrypt_cipher if @encrypt_cipher
 
-    return cipher, key, iv
+    @encrypt_cipher = OpenSSL::Cipher.new('aes-256-cbc')
+    @encrypt_cipher.encrypt
+
+    if @initial_call
+      @key = @encrypt_cipher.random_key
+      @iv = @encrypt_cipher.random_iv
+    else
+      @encrypt_cipher.key = @key
+      @encrypt_cipher.iv = @iv
+    end
+
+    @encrypt_cipher
   end
 end

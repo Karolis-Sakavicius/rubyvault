@@ -2,20 +2,11 @@
 # Bits 0-7: unused
 
 class Flags
-  FLAGS_OFFSET = 5
-
-  def initialize(flags)
+  def initialize(vault_file)
+    @vault_file = vault_file
   end
 
-  def to_binary
-    [0].pack('C')
-  end
-
-  def to_h
-    {}
-  end
-
-  def self.from_file(file)
-    new(0)
+  def commit_changes!
+    @vault_file.write_to(:flags, "\x00")
   end
 end

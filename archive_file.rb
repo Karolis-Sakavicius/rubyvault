@@ -34,17 +34,19 @@ class ArchiveFile
   end
 
   def save_at!(location)
-    @vault_file.pos = location
-
     encrypted_file = cipher.update(@file.read) + cipher.final
 
-    @vault_file << [16, 244, 232, 12, 24, 114, 163, 93, 48, 102, 203, 227, 98, 165, 207, 49].pack('C*') # signature (16 bytes)
-    @vault_file << @rsa_pem.public_encrypt(@file_key) # file key
-    @vault_file << [encrypted_file.size].pack('Q') # encrypted size (uint_64)
-    @vault_file << [@mtime.to_i].pack('Q') # mtime (uint_64)
-    @vault_file << @iv
+    @vault_file.lock_into(:data) do
+      @vault_file.move_to(location)
 
-    @vault_file << encrypted_file
+      @vault_file << [16, 244, 232, 12, 24, 114, 163, 93, 48, 102, 203, 227, 98, 165, 207, 49].pack('C*') # signature (16 bytes)
+      @vault_file << @rsa_pem.public_encrypt(@file_key) # file key
+      @vault_file << [encrypted_file.size].pack('Q') # encrypted size (uint_64)
+      @vault_file << [@mtime.to_i].pack('Q') # mtime (uint_64)
+      @vault_file << @iv
+
+      @vault_file << encrypted_file
+    end
 
     @lfd_location = location
     @encrypted_size = encrypted_file.size
@@ -57,12 +59,16 @@ class ArchiveFile
 
     @vault_file.pos = @lfd_location + LFD_SIZE
 
-    # TODO: loads everything to memory, decrypt in chunks
-    encrypted_file = @vault_file.read(@encrypted_size)
-    decrypted_file = @decrypt_cipher.update(encrypted_file) + @decrypt_cipher.final
+    @vault_file.lock_into(:data) do
+      @vault_file.move_to(@lfd_location + LFD_SIZE) # skipping the LFD
 
-    File.open(@filename, 'wb') do |f|
-      f << decrypted_file
+      # TODO: loads everything to memory, decrypt in chunks
+      encrypted_file = @vault_file.read(@encrypted_size)
+      decrypted_file = @decrypt_cipher.update(encrypted_file) + @decrypt_cipher.final
+
+      File.open(@filename, 'wb') do |f|
+        f << decrypted_file
+      end
     end
   end
 end

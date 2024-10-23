@@ -44,35 +44,31 @@
 # 825 bytes per row
 
 require 'openssl'
+require_relative './vault_file.rb'
 require_relative './metadata.rb'
 require_relative './flags.rb'
 require_relative './allocation_table.rb'
 require 'pry'
 
 class Archive
-  VERSION_OFFSET = 4
-  FLAGS_OFFSET = 5
-  METADATA_OFFSET = 6
-  ALLOCATION_TABLE_OFFSET = 1722
   RUBYVAULT_VERSION = 1
 
   attr_reader :version, :metadata, :flags
 
-  def initialize(filepath, rsa_pem:, metadata: {}, **flags)
+  def initialize(filepath, rsa_pem:, **flags)
     @rsa_pem = rsa_pem
+    @vault_file = VaultFile.new(filepath)
 
-    if File.exists? filepath
-      @file = File.open(filepath, "rb+")
-
-      load_file
-    else
-      @file = File.open(filepath, "wb+")
-
+    if @vault_file.empty?
       @version = RUBYVAULT_VERSION
-      @metadata = Metadata.new(rsa_pem, metadata)
-      @flags = Flags.new(flags)
-      @allocation_table = AllocationTable.new(@rsa_pem, @file)
+    else
+      @version = @vault_file.read_from(:version, 1).unpack('C').first
     end
+
+    binding.pry
+    @flags = Flags.new(@vault_file)
+    @metadata = Metadata.new(@rsa_pem, @vault_file)
+    @allocation_table = AllocationTable.new(@rsa_pem, @vault_file)
   end
 
   def self.open(filepath, rsa_pem:)
@@ -90,23 +86,12 @@ class Archive
   end
 
   def save!
-    @file.pos = 0
+    @vault_file.write_to(:signature, [10, 68, 123, 34].pack('C*')) # vault file signature
+    @vault_file.write_to(:version, [@version].pack('C')) # RubyVault version
 
-    @file << [10, 68, 123, 34].pack('C*') # vault file signature
-    @file << [@version].pack('C') # RubyVault version
-    @file << @flags.to_binary # Flags
-    @file << @metadata.to_binary # Metadata
+    @flags.commit_changes!
+    @metadata.commit_changes!
     @allocation_table.commit_changes!
-  end
-
-  private
-
-  def load_file
-    @file.pos = VERSION_OFFSET
-    @version = @file.read(1).unpack('C').first
-    @flags = Flags.from_file(@file)
-    @metadata = Metadata.from_file(@file, @rsa_pem)
-    @allocation_table = AllocationTable.new(@rsa_pem, @file)
   end
 end
 
