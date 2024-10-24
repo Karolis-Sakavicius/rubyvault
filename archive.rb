@@ -51,7 +51,7 @@ require_relative './allocation_table.rb'
 require 'pry'
 
 class Archive
-  RUBYVAULT_VERSION = 1
+  RUBYVAULT_VERSION = 2
 
   attr_reader :version, :metadata, :flags
 
@@ -62,10 +62,9 @@ class Archive
     if @vault_file.empty?
       @version = RUBYVAULT_VERSION
     else
-      @version = @vault_file.read_from(:version, 1).unpack('C').first
+      @version = @vault_file.read_uint8_t_from_section(:version)
     end
 
-    binding.pry
     @flags = Flags.new(@vault_file)
     @metadata = Metadata.new(@rsa_pem, @vault_file)
     @allocation_table = AllocationTable.new(@rsa_pem, @vault_file)
@@ -87,7 +86,7 @@ class Archive
 
   def save!
     @vault_file.write_to(:signature, [10, 68, 123, 34].pack('C*')) # vault file signature
-    @vault_file.write_to(:version, [@version].pack('C')) # RubyVault version
+    @vault_file.write_uint8_t_to_section(:version, @version) # RubyVault version
 
     @flags.commit_changes!
     @metadata.commit_changes!

@@ -64,13 +64,13 @@ class AllocationTable
         @vault_file.lock_into(:allocation_table) do
           @vault_file.move_to(row * ROW_LENGTH)
 
-          @vault_file << [record.lfd_location].pack('Q') # LFD location (uint_64)
+          @vault_file.write_uint64_t(record.lfd_location) # LFD location
           @vault_file << @rsa_pem.public_encrypt(record.file_key) # AES-256 key
           @vault_file << record.iv # dupe for now TODO
           @vault_file << record.iv # iv
-          @vault_file << [record.encrypted_size].pack('Q') # encrypted size (uint_64)
-          @vault_file << [record.mtime.to_i].pack('Q') # mtime (uint_64)
-          @vault_file << [encrypted_filename.size].pack('C') # encrypted filename length
+          @vault_file.write_uint64_t(record.encrypted_size) # encrypted size
+          @vault_file.write_uint64_t(record.mtime.to_i)  # mtime
+          @vault_file.write_uint8_t(encrypted_filename.size) # encrypted filename length
           @vault_file << encrypted_filename # filename
         end
       end
@@ -88,13 +88,13 @@ class AllocationTable
 
     @vault_file.lock_into(:allocation_table) do
       4096.times do |row|
-        lfd_location = @vault_file.read(8).unpack('Q').first
+        lfd_location = @vault_file.read_uint64_t
         encrypted_file_key = @vault_file.read(512)
         iv = @vault_file.read(16)
         @vault_file.read(16) # TODO: unify IVs for filenames and data
-        encrypted_size = @vault_file.read(8).unpack('Q').first
-        mtime = @vault_file.read(8).unpack('Q').first
-        encrypted_filename_length = @vault_file.read(1).unpack('C').first
+        encrypted_size = @vault_file.read_uint64_t
+        mtime = @vault_file.read_uint64_t
+        encrypted_filename_length = @vault_file.read_uint8_t
         encrypted_filename = @vault_file.read(256)[0..encrypted_filename_length - 1]
 
         break if encrypted_filename_length == 0 # reached the end of the table

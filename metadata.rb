@@ -43,9 +43,9 @@ class Metadata
       end
 
       12.times do |row|
-        key_length = @vault_file.read(1).unpack('C').first
-        value_length = @vault_file.read(1).unpack('C').first
-        is_encrypted = @vault_file.read(1).unpack('C').first
+        key_length = @vault_file.read_uint8_t
+        value_length = @vault_file.read_uint8_t
+        is_encrypted = @vault_file.read_uint8_t
 
         break if key_length == 0 # further meta rows are empty
 
@@ -124,15 +124,15 @@ class Metadata
         encrypted_key = encrypt_cipher.update(meta[:key].to_s) + encrypt_cipher.final
         encrypted_value = encrypt_cipher.update(meta[:value]) + encrypt_cipher.final
 
-        @vault_file << [encrypted_key.size].pack('C') # key length
-        @vault_file << [encrypted_value.size].pack('C') # value length
-        @vault_file << [1].pack('C') # is encrypted = 1
+        @vault_file.write_uint8_t(encrypted_key.size) # key length
+        @vault_file.write_uint8_t(encrypted_value.size) # value length
+        @vault_file.write_uint8_t(1) # is encrypted = 1
         @vault_file << encrypted_key.ljust(32, "\x00") # key
         @vault_file << encrypted_value.ljust(64, "\x00") # value
       else
-        @vault_file << [meta[:key].size].pack('C') # key length
-        @vault_file << [meta[:value].size].pack('C') # value length
-        @vault_file << [0].pack('C') # is encrypted = 0
+        @vault_file.write_uint8_t(meta[:key].size) # key length
+        @vault_file.write_uint8_t(meta[:value].size) # value length
+        @vault_file.write_uint8_t(0) # is encrypted = 1
         @vault_file << [meta[:key].to_s].pack('a*').ljust(32, "\x00") # key
         @vault_file << [meta[:value]].pack('a*').ljust(64, "\x00") # value
       end

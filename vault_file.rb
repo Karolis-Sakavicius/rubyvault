@@ -25,6 +25,47 @@ class VaultFile
     data: {start: 3_380_922}
   }.freeze
 
+  TYPES = {
+    uint8_t: {directive: 'C', length: 1},
+    uint16_t: {directive: 'S', length: 2},
+    uint32_t: {directive: 'L', length: 4},
+    uint64_t: {directive: 'Q', length: 8}
+  }.freeze
+
+  TYPES.each do |type|
+    define_method "read_#{type.first}" do
+      read(type.last[:length]).unpack(type.last[:directive]).first
+    end
+  end
+
+  TYPES.each do |type|
+    define_method "write_#{type.first}" do |data|
+      self << [data].pack(type.last[:directive])
+    end
+  end
+
+  TYPES.each do |type|
+    define_method "read_#{type.first}_from_section" do |section, position: 0|
+      data = nil
+
+      lock_into(section) do
+        move_to position
+        data = send("read_#{type.first}")
+      end
+
+      data
+    end
+  end
+
+  TYPES.each do |type|
+    define_method "write_#{type.first}_to_section" do |section, data, position: 0|
+      lock_into(section) do
+        move_to position
+        self << [data].pack(type.last[:directive])
+      end
+    end
+  end
+
   def initialize(filepath)
     if File.exists? filepath
       @file = File.open(filepath, "rb+")
@@ -58,7 +99,7 @@ class VaultFile
   def write_to(section, data, position: 0)
     lock_into(section) do
       move_to position
-      @file << data
+      self << data
     end
   end
 

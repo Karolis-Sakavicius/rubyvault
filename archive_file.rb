@@ -41,8 +41,8 @@ class ArchiveFile
 
       @vault_file << [16, 244, 232, 12, 24, 114, 163, 93, 48, 102, 203, 227, 98, 165, 207, 49].pack('C*') # signature (16 bytes)
       @vault_file << @rsa_pem.public_encrypt(@file_key) # file key
-      @vault_file << [encrypted_file.size].pack('Q') # encrypted size (uint_64)
-      @vault_file << [@mtime.to_i].pack('Q') # mtime (uint_64)
+      @vault_file.write_uint64_t(encrypted_file.size) # encrypted size
+      @vault_file.write_uint64_t(@mtime.to_i) # mtime
       @vault_file << @iv
 
       @vault_file << encrypted_file
